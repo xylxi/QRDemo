@@ -71,6 +71,15 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     /// 打开相册时覆盖在预览上的“冻结最后一帧”视图，用于过渡动画。
     private var transitionFreezeView: UIView?
 
+    /// 在主线程执行 block：若当前已在主线程则同步执行，否则派发到主线程异步执行。
+    private func runOnMainThread(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.async(execute: block)
+        }
+    }
+
     /// 初始化背景色、UI 和采集会话，并打日志。
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -215,7 +224,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             logInfo(self.logTag, items: "开始配置 AVCaptureSession")
 
             guard let camera = AVCaptureDevice.default(for: .video) else {
-                DispatchQueue.main.async {
+                self.runOnMainThread { [weak self] in
+                    guard let self else { return }
                     logError(self.logTag, items: "无法获取相机设备")
                     self.delegate?.qrScannerDidCancel(self)
                 }
@@ -249,7 +259,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
                 let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
                 preview.videoGravity = .resizeAspectFill
 
-                DispatchQueue.main.async {
+                self.runOnMainThread { [weak self] in
+                    guard let self else { return }
                     self.view.layer.insertSublayer(preview, at: 0)
                     self.previewLayer = preview
                     self.previewLayer?.frame = self.view.bounds
@@ -257,7 +268,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
                     logInfo(self.logTag, items: "相机预览层已添加")
                 }
             } catch {
-                DispatchQueue.main.async {
+                self.runOnMainThread { [weak self] in
+                    guard let self else { return }
                     logError(self.logTag, items: "配置 AVCaptureSession 失败:", error.localizedDescription)
                     self.delegate?.qrScannerDidCancel(self)
                 }
@@ -297,7 +309,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             self.metadataOutput.metadataObjectTypes = []
             logInfo(self.logTag, items: "已停止后续识别回调")
         }
-        DispatchQueue.main.async { [weak self] in
+        runOnMainThread { [weak self] in
             guard let self else { return }
             self.delegate?.qrScanner(self, didScan: code)
         }
@@ -359,7 +371,7 @@ extension QRScannerViewController {
                 logInfo(self.logTag, items: "相册打开完成后停止 AVCaptureSession")
                 self.captureSession.stopRunning()
             }
-            DispatchQueue.main.async { [weak self] in
+            self.runOnMainThread { [weak self] in
                 self?.installFreezeFrameOverlay(reason: "相册打开完成")
             }
         }
@@ -462,7 +474,8 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
                 guard let self else { return }
 
                 if let error {
-                    DispatchQueue.main.async {
+                    self.runOnMainThread { [weak self] in
+                        guard let self else { return }
                         logError(self.logTag, items: "读取相册图片失败:", error.localizedDescription)
                         self.showAlbumRecognizeFailedAlert()
                         self.resumeScanningAfterAlbumIfNeeded(reason: "读取图片失败")
@@ -471,7 +484,8 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
                 }
 
                 guard let image = object as? UIImage else {
-                    DispatchQueue.main.async {
+                    self.runOnMainThread { [weak self] in
+                        guard let self else { return }
                         logError(self.logTag, items: "读取相册图片失败: 类型转换失败")
                         self.showAlbumRecognizeFailedAlert()
                         self.resumeScanningAfterAlbumIfNeeded(reason: "图片类型转换失败")
@@ -480,7 +494,8 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
                 }
 
                 guard let code = self.detectQRCodeV2(in: image) else {
-                    DispatchQueue.main.async {
+                    self.runOnMainThread { [weak self] in
+                        guard let self else { return }
                         logInfo(self.logTag, items: "相册图片中未识别到二维码")
                         self.showAlbumRecognizeFailedAlert()
                         self.resumeScanningAfterAlbumIfNeeded(reason: "图片中未识别到二维码")
@@ -488,7 +503,7 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
                     return
                 }
 
-                DispatchQueue.main.async { [weak self] in
+                self.runOnMainThread { [weak self] in
                     self?.handleDetectedCode(code, source: "相册")
                 }
             }
@@ -535,7 +550,8 @@ private extension QRScannerViewController {
     /// 在预览上覆盖当前画面的快照视图，用于打开相册时的过渡效果；主线程执行。
     /// - Parameter reason: 安装原因，仅用于日志。
     func installFreezeFrameOverlay(reason: String) {
-        DispatchQueue.main.async {
+        runOnMainThread { [weak self] in
+            guard let self else { return }
             self.removeFreezeFrameOverlay()
             guard let snapshot = self.view.snapshotView(afterScreenUpdates: false) else {
                 logError(self.logTag, items: "冻结帧创建失败")
@@ -551,15 +567,10 @@ private extension QRScannerViewController {
 
     /// 移除冻结帧覆盖层；若在非主线程调用会派发到主线程执行。
     func removeFreezeFrameOverlay() {
-        if Thread.isMainThread {
-            transitionFreezeView?.removeFromSuperview()
-            transitionFreezeView = nil
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let freezeView = self.transitionFreezeView else { return }
-                self.transitionFreezeView = nil
-                freezeView.removeFromSuperview()
-            }
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            self.transitionFreezeView?.removeFromSuperview()
+            self.transitionFreezeView = nil
         }
     }
 }

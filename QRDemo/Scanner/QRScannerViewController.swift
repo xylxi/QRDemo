@@ -23,20 +23,32 @@ protocol QRScannerViewControllerDelegate: AnyObject {
 /// 基于 AVCaptureSession 的二维码扫描页面。
 final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
 
+    /// 扫码结果与取消事件的回调代理。
     weak var delegate: QRScannerViewControllerDelegate?
+    /// 日志标签，用于区分本模块的日志输出。
     private let logTag = "QRScanner"
 
-    // 会话相关状态都在 sessionQueue 上操作，避免线程竞态。
+    /// 相机采集会话，负责输入输出与运行状态。
+    /// 会话相关状态都在 sessionQueue 上操作，避免线程竞态。
     private let captureSession = AVCaptureSession()
+    /// 串行队列，用于配置与启停 AVCaptureSession，保证线程安全。
     private let sessionQueue = DispatchQueue(label: "com.ruir.qrdemo.capture.session")
+    /// 元数据输出，用于接收二维码识别结果。
     private let metadataOutput = AVCaptureMetadataOutput()
+    /// 相机预览层，将采集画面显示在界面上。
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    /// 是否已完成会话配置（输入、输出、预览等），配置仅执行一次。
     private var isSessionConfigured = false
+    /// 页面期望会话是否运行；与 view 显示/消失同步，用于延迟启动场景。
     private var wantsSessionRunning = false
 
+    /// 半透明遮罩层，用于高亮扫描框区域（挖空效果）。
     private let overlayLayer = CAShapeLayer()
+    /// 扫描框视图，白色边框圆角矩形。
     private let scanFrameView = UIView()
+    /// 扫描框内的绿色扫描线，带动画效果。
     private let scanLine = UIView()
+    /// 扫描框下方的提示文案标签。
     private let tipLabel: UILabel = {
         let label = UILabel()
         label.text = "将二维码放入框内即可自动扫描"
@@ -46,15 +58,20 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         return label
     }()
 
-    // 首次识别成功后置为 true，避免重复回调业务层。
+    /// 首次识别成功后置为 true，避免重复回调业务层。
     private var hasHandledCode = false
-    // 扫描线动画仅在布局稳定后启动一次。
+    /// 扫描线动画是否已启动；仅在布局稳定后启动一次。
     private var didStartLineAnimation = false
+    /// 是否正处于相册选图流程（防重复点击、判断是否需恢复扫描）。
     private var isAlbumPicking = false
+    /// 是否正在展示相册选择器；为 true 时 viewWillDisappear 不停止相机会话。
     private var isPresentingPhotoPicker = false
+    /// 当前展示的相册选择器弱引用，用于 dismiss 后清理与手势关闭判断。
     private weak var activePhotoPicker: PHPickerViewController?
+    /// 打开相册时覆盖在预览上的“冻结最后一帧”视图，用于过渡动画。
     private var transitionFreezeView: UIView?
 
+    /// 初始化背景色、UI 和采集会话，并打日志。
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -63,6 +80,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         logInfo(logTag, items: "扫码页加载完成")
     }
 
+    /// 布局子视图时更新预览层与遮罩尺寸，并在扫描框就绪后启动扫描线动画。
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
@@ -74,6 +92,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         }
     }
 
+    /// 页面即将显示时重置“已处理”标记，并请求在 sessionQueue 上启动相机会话。
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         hasHandledCode = false
@@ -91,6 +110,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         }
     }
 
+    /// 页面即将消失时在 sessionQueue 上停止相机会话；若正在展示相册则保持运行。
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         if isPresentingPhotoPicker {
@@ -108,7 +128,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             }
         }
     }
-    
+
+    /// 控制器释放时打日志，便于排查生命周期问题。
     deinit {
         logInfo(logTag, items: "deinit")
     }
@@ -253,11 +274,16 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         overlayLayer.path = fullPath.cgPath
     }
 
+    /// 用户点击“关闭”按钮时通知代理取消，并关闭扫码页。
     @objc private func didTapClose() {
         logInfo(logTag, items: "点击关闭扫码页")
         delegate?.qrScannerDidCancel(self)
     }
 
+    /// 统一处理识别到的二维码：防重复、移除冻结帧、停止识别回调并通知代理。
+    /// - Parameters:
+    ///   - code: 识别到的二维码字符串内容。
+    ///   - source: 来源描述（如 "相机"、"相册"），仅用于日志。
     private func handleDetectedCode(_ code: String, source: String) {
         guard !hasHandledCode else { return }
 
@@ -295,6 +321,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
 // MARK: - 相册选图
 extension QRScannerViewController {
+    /// 用户点击“相册”按钮时，若未已处理过码且未在选图流程中，则打开相册选择器。
     @objc private func didTapAlbum() {
         guard !hasHandledCode else { return }
         guard !isAlbumPicking else { return }
@@ -303,6 +330,8 @@ extension QRScannerViewController {
         logInfo(logTag, items: "点击相册入口")
         presentPhotoPicker()
     }
+
+    /// 创建并展示 PHPickerViewController，选择单张图片；展示完成后在后台停止相机并安装冻结帧。
     private func presentPhotoPicker() {
         var configuration = PHPickerConfiguration(photoLibrary: .shared())
         configuration.selectionLimit = 1
@@ -321,6 +350,7 @@ extension QRScannerViewController {
         }
     }
 
+    /// 相册已完全展示后，在 sessionQueue 上停止 AVCaptureSession，并在主线程安装冻结帧覆盖层。
     private func stopCameraAfterAlbumPresented() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -363,6 +393,9 @@ extension QRScannerViewController {
             .first { !$0.isEmpty }
     }
 
+    /// 使用 Core Image 的 CIDetector 识别图片中的二维码（备用方案）。
+    /// - Parameter image: 待识别的图片。
+    /// - Returns: 第一个识别到的非空二维码字符串，若无则返回 nil。
     private func detectQRCodeV1(in image: UIImage) -> String? {
         guard let ciImage = CIImage(image: image) else {
             return nil
@@ -374,6 +407,7 @@ extension QRScannerViewController {
         let features = detector.features(in: ciImage)
         return features .compactMap { ($0 as? CIQRCodeFeature)?.messageString } .first { !$0.isEmpty } }
     
+    /// 相册选图未识别到二维码时，弹出提示弹窗告知用户重新选择。
     private func showAlbumRecognizeFailedAlert() {
         let alert = UIAlertController(title: "未识别到二维码", message: "请重新选择一张包含清晰二维码的图片。", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "知道了", style: .default))
@@ -382,6 +416,7 @@ extension QRScannerViewController {
 }
 
 // MARK: - UIImageOrientation -> CGImagePropertyOrientation
+/// 将 UIImage 的朝向转换为 Vision 使用的 CGImagePropertyOrientation。
 private extension CGImagePropertyOrientation {
     init(_ uiOrientation: UIImage.Orientation) {
         switch uiOrientation {
@@ -399,6 +434,7 @@ private extension CGImagePropertyOrientation {
 }
 
 extension QRScannerViewController: PHPickerViewControllerDelegate {
+    /// 相册选择完成：若用户选了图则加载图片并用 Vision 识别二维码，否则恢复扫描；关闭时移除冻结帧。
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
         activePhotoPicker = nil
         logInfo(logTag, items: "关闭相册（冻结帧过渡）")
@@ -459,6 +495,8 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
         }
     }
 
+    /// 相册流程结束且未识别到码时，恢复元数据代理与 QR 类型，重新启动相机会话并移除冻结帧。
+    /// - Parameter reason: 恢复原因描述，仅用于日志。
     fileprivate func resumeScanningAfterAlbumIfNeeded(reason: String) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -480,6 +518,7 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
 }
 
 extension QRScannerViewController: UIAdaptivePresentationControllerDelegate {
+    /// 用户通过下滑手势关闭相册时，清理选图状态并恢复扫码会话与界面。
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         guard presentationController.presentedViewController is PHPickerViewController else { return }
         guard isAlbumPicking else { return }
@@ -493,6 +532,8 @@ extension QRScannerViewController: UIAdaptivePresentationControllerDelegate {
 
 // MARK: - 冻结最后一帧过渡
 private extension QRScannerViewController {
+    /// 在预览上覆盖当前画面的快照视图，用于打开相册时的过渡效果；主线程执行。
+    /// - Parameter reason: 安装原因，仅用于日志。
     func installFreezeFrameOverlay(reason: String) {
         DispatchQueue.main.async {
             self.removeFreezeFrameOverlay()
@@ -508,6 +549,7 @@ private extension QRScannerViewController {
         }
     }
 
+    /// 移除冻结帧覆盖层；若在非主线程调用会派发到主线程执行。
     func removeFreezeFrameOverlay() {
         if Thread.isMainThread {
             transitionFreezeView?.removeFromSuperview()

@@ -7,12 +7,14 @@
 
 import UIKit
 import AVFoundation
-import Photos
 
 final class ViewController: UIViewController {
 
     private let logTag = "ViewController"
     private let personalPageURL = "https://example.com/user/ruir"
+    private let personalNickname = "ruir"
+    private let qrGenerateQueue = DispatchQueue(label: "com.ruir.qrdemo.personal.qr.generate", qos: .userInitiated)
+    private var isGeneratingPersonalQRCode = false
 
     private let scanButton: UIButton = {
         let button = UIButton(type: .system)
@@ -36,16 +38,6 @@ final class ViewController: UIViewController {
         return button
     }()
 
-    private let qrImageView: UIImageView = {
-        let imageView = UIImageView()
-        imageView.contentMode = .scaleAspectFit
-        imageView.backgroundColor = UIColor.secondarySystemBackground
-        imageView.layer.cornerRadius = 16
-        imageView.clipsToBounds = true
-        imageView.heightAnchor.constraint(equalToConstant: 280).isActive = true
-        return imageView
-    }()
-
     private let infoLabel: UILabel = {
         let label = UILabel()
         label.numberOfLines = 0
@@ -66,7 +58,7 @@ final class ViewController: UIViewController {
     }
 
     private func setupLayout() {
-        let stack = UIStackView(arrangedSubviews: [scanButton, generateButton, qrImageView, infoLabel])
+        let stack = UIStackView(arrangedSubviews: [scanButton, generateButton, infoLabel])
         stack.axis = .vertical
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -126,71 +118,50 @@ final class ViewController: UIViewController {
     }
 
     @objc private func didTapGenerateQRCode() {
+        guard !isGeneratingPersonalQRCode else { return }
         logInfo(logTag, items: "点击生成二维码，内容:", personalPageURL)
-        let avatar = AvatarFactory.makeAvatarImage()
-        guard let qrImage = QRCodeBuilder.generate(content: personalPageURL, avatar: avatar, size: 800) else {
-            logError(logTag, items: "二维码生成失败")
-            showAlert(title: "生成失败", message: "二维码生成失败，请稍后重试")
-            return
-        }
-        logInfo(logTag, items: "二维码生成成功，尺寸:", Int(qrImage.size.width), "x", Int(qrImage.size.height))
-        qrImageView.image = qrImage
-        infoLabel.text = "个人页面二维码已生成：\(personalPageURL)"
-        saveQRCodeToPhotoLibrary(qrImage)
-    }
+        isGeneratingPersonalQRCode = true
+        setGenerateButtonLoading(true)
 
-    private func saveQRCodeToPhotoLibrary(_ image: UIImage) {
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        logInfo(logTag, items: "相册写入权限状态:", status.rawValue)
-        switch status {
-        case .authorized, .limited:
-            writeImageToPhotoLibrary(image)
-        case .notDetermined:
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] newStatus in
-                DispatchQueue.main.async {
-                    switch newStatus {
-                    case .authorized, .limited:
-                        logInfo(self?.logTag ?? "ViewController", items: "用户授权相册写入，开始保存二维码")
-                        self?.writeImageToPhotoLibrary(image)
-                    case .denied, .restricted:
-                        logError(self?.logTag ?? "ViewController", items: "用户拒绝相册权限:", newStatus.rawValue)
-                        self?.showAlert(title: "保存失败", message: "请在系统设置中允许访问相册后重试。")
-                    case .notDetermined:
-                        logError(self?.logTag ?? "ViewController", items: "相册权限状态仍未决定")
-                        self?.showAlert(title: "保存失败", message: "未获取到相册权限，请重试。")
-                    @unknown default:
-                        logError(self?.logTag ?? "ViewController", items: "未知相册权限状态")
-                        self?.showAlert(title: "保存失败", message: "相册权限状态异常。")
-                    }
+        let content = personalPageURL
+        let nickname = personalNickname
+        qrGenerateQueue.async { [weak self] in
+            let avatar = AvatarFactory.makeAvatarImage()
+            let qrImage = QRCodeBuilder.generate(content: content, avatar: avatar, size: 800)
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isGeneratingPersonalQRCode = false
+                self.setGenerateButtonLoading(false)
+
+                guard let qrImage else {
+                    logError(self.logTag, items: "二维码生成失败")
+                    self.showAlert(title: "生成失败", message: "二维码生成失败，请稍后重试")
+                    return
+                }
+
+                logInfo(self.logTag, items: "二维码生成成功，准备打开个人二维码页面")
+                let page = PersonalQRCodeViewController(
+                    qrImage: qrImage,
+                    nickname: nickname,
+                    subtitle: "扫码二维码，关注我的个人账号"
+                )
+                if let navigationController = self.navigationController {
+                    navigationController.pushViewController(page, animated: true)
+                } else {
+                    let nav = UINavigationController(rootViewController: page)
+                    nav.modalPresentationStyle = .fullScreen
+                    self.present(nav, animated: true)
                 }
             }
-        case .denied, .restricted:
-            logError(logTag, items: "相册权限不可用:", status.rawValue)
-            showAlert(title: "保存失败", message: "请在系统设置中允许访问相册后重试。")
-        @unknown default:
-            logError(logTag, items: "未知相册权限状态")
-            showAlert(title: "保存失败", message: "相册权限状态异常。")
         }
     }
 
-    private func writeImageToPhotoLibrary(_ image: UIImage) {
-        logInfo(logTag, items: "开始写入二维码到相册")
-        UIImageWriteToSavedPhotosAlbum(
-            image,
-            self,
-            #selector(image(_:didFinishSavingWithError:contextInfo:)),
-            nil
-        )
-    }
-
-    @objc private func image(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeMutableRawPointer?) {
-        if let error {
-            logError(logTag, items: "二维码保存到相册失败:", error.localizedDescription)
-            showAlert(title: "保存失败", message: error.localizedDescription)
-            return
-        }
-        logInfo(logTag, items: "二维码已保存到相册")
-        showAlert(title: "保存成功", message: "二维码已保存到系统相册。")
+    private func setGenerateButtonLoading(_ loading: Bool) {
+        generateButton.isEnabled = !loading
+        generateButton.alpha = loading ? 0.7 : 1.0
+        let title = loading ? "生成中..." : "生成个人页面二维码"
+        generateButton.setTitle(title, for: .normal)
     }
 
     private func showCameraDeniedAlert() {

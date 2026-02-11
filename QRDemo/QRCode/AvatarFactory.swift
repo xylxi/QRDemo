@@ -9,35 +9,12 @@ import UIKit
 
 enum AvatarFactory {
     static func makeAvatarImage() -> UIImage {
-        if let image = UIImage(named: "avatar.JPEG") {
-            logInfo("AvatarFactory", items: "使用 UIImage(named:) 加载 avatar.JPEG")
-            return image
-        }
-
-        if let url = Bundle.main.url(forResource: "avatar", withExtension: "JPEG"),
-           let data = try? Data(contentsOf: url),
-           let image = UIImage(data: data) {
-            logInfo("AvatarFactory", items: "使用 Bundle 文件加载 avatar.JPEG")
-            return image
-        }
-
-        if let image = UIImage(named: "avatar") {
-            logInfo("AvatarFactory", items: "使用 UIImage(named:) 加载 avatar")
-            return image
-        }
-
-        if let url = Bundle.main.url(forResource: "avatar", withExtension: "jpg"),
-           let data = try? Data(contentsOf: url),
-           let image = UIImage(data: data) {
-            logInfo("AvatarFactory", items: "使用 Bundle 文件加载 avatar.jpg")
-            return image
-        }
-
-        if let url = Bundle.main.url(forResource: "avatar", withExtension: "jpeg"),
-           let data = try? Data(contentsOf: url),
-           let image = UIImage(data: data) {
-            logInfo("AvatarFactory", items: "使用 Bundle 文件加载 avatar.jpeg")
-            return image
+        let candidates = ["JPEG", "jpg", "jpeg", "JPG"]
+        for ext in candidates {
+            if let image = loadBundleImage(resource: "avatar", ext: ext) {
+                logInfo("AvatarFactory", items: "使用 Bundle 文件加载 avatar.\(ext)")
+                return image
+            }
         }
 
         logError("AvatarFactory", items: "未找到头像资源，使用默认占位头像")
@@ -59,5 +36,15 @@ enum AvatarFactory {
                 symbol.draw(in: symbolRect)
             }
         }
+    }
+
+    private static func loadBundleImage(resource: String, ext: String) -> UIImage? {
+        guard let url = Bundle.main.url(forResource: resource, withExtension: ext) else {
+            return nil
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return UIImage(data: data)
     }
 }

@@ -8,16 +8,21 @@
 import UIKit
 import AVFoundation
 
+/// 扫码结果回调协议。
 protocol QRScannerViewControllerDelegate: AnyObject {
+    /// 成功识别到二维码内容后回调。
     func qrScanner(_ controller: QRScannerViewController, didScan code: String)
+    /// 用户主动取消或扫码不可用时回调。
     func qrScannerDidCancel(_ controller: QRScannerViewController)
 }
 
+/// 基于 AVCaptureSession 的二维码扫描页面。
 final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
 
     weak var delegate: QRScannerViewControllerDelegate?
     private let logTag = "QRScanner"
 
+    // 会话相关状态都在 sessionQueue 上操作，避免线程竞态。
     private let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.ruir.qrdemo.capture.session")
     private let metadataOutput = AVCaptureMetadataOutput()
@@ -37,7 +42,9 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         return label
     }()
 
+    // 首次识别成功后置为 true，避免重复回调业务层。
     private var hasHandledCode = false
+    // 扫描线动画仅在布局稳定后启动一次。
     private var didStartLineAnimation = false
 
     override func viewDidLoad() {
@@ -62,6 +69,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         super.viewWillAppear(animated)
         hasHandledCode = false
         logInfo(logTag, items: "扫码页即将显示")
+        // 页面显示后请求启动会话；若尚未配置完成，会在配置完成后启动。
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.wantsSessionRunning = true
@@ -77,6 +85,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         logInfo(logTag, items: "扫码页即将消失")
+        // 页面离开时停止会话，避免后台继续占用相机资源。
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.wantsSessionRunning = false
@@ -86,7 +95,12 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             }
         }
     }
+    
+    deinit {
+        logInfo(logTag, items: "deinit")
+    }
 
+    /// 搭建扫码页 UI：遮罩、扫描框、扫描线、提示文案和关闭按钮。
     private func setupUI() {
         overlayLayer.fillColor = UIColor.black.withAlphaComponent(0.55).cgColor
         overlayLayer.fillRule = .evenOdd
@@ -135,6 +149,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         ])
     }
 
+    /// 启动扫描线在扫描框内的往返动画。
     private func startScanLineAnimation() {
         scanLine.layer.removeAnimation(forKey: "scan")
         view.layoutIfNeeded()
@@ -147,6 +162,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         scanLine.layer.add(animation, forKey: "scan")
     }
 
+    /// 配置相机会话输入输出；该流程只会执行一次。
     private func setupCaptureSession() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -173,6 +189,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
                     self.captureSession.addOutput(self.metadataOutput)
                     self.metadataOutput.metadataObjectTypes = [.qr]
                     self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+                    // 先使用全屏识别区域，后续如需优化可按扫描框映射缩小区域。
                     self.metadataOutput.rectOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
                 }
 
@@ -203,6 +220,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         }
     }
 
+    /// 更新遮罩路径：整屏半透明 + 扫描框区域挖空。
     private func updateScanOverlay() {
         let fullPath = UIBezierPath(rect: view.bounds)
         let holeRect = scanFrameView.frame.insetBy(dx: -2, dy: -2)
@@ -216,6 +234,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         delegate?.qrScannerDidCancel(self)
     }
 
+    /// 识别到二维码后上报结果，并立即关闭后续识别回调。
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !hasHandledCode else { return }
         guard
@@ -232,6 +251,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.wantsSessionRunning = false
+            // 移除可识别类型即可停止回调，防止重复触发。
             self.metadataOutput.metadataObjectTypes = []
             logInfo(self.logTag, items: "已停止后续识别回调")
         }

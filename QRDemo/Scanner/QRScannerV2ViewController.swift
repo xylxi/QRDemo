@@ -1,5 +1,5 @@
 //
-//  QRScannerViewController.swift
+//  QRScannerV2ViewController.swift
 //  QRDemo
 //
 //  Created by Codex on 2026/2/11.
@@ -8,44 +8,48 @@
 import UIKit
 import AVFoundation
 
-protocol QRScannerViewControllerDelegate: AnyObject {
-    func qrScanner(_ controller: QRScannerViewController, didScan code: String)
-    func qrScannerDidCancel(_ controller: QRScannerViewController)
+protocol QRScannerV2ViewControllerDelegate: AnyObject {
+    func qrScannerV2(_ controller: QRScannerV2ViewController, didScan code: String)
+    func qrScannerV2DidCancel(_ controller: QRScannerV2ViewController)
 }
 
-final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+final class QRScannerV2ViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
 
-    weak var delegate: QRScannerViewControllerDelegate?
-    private let logTag = "QRScanner"
+    weak var delegate: QRScannerV2ViewControllerDelegate?
+    private let logTag = "QRScannerV2"
 
     private let captureSession = AVCaptureSession()
-    private let sessionQueue = DispatchQueue(label: "com.ruir.qrdemo.capture.session")
+    private let queueSpecificKey = DispatchSpecificKey<Void>()
+    private lazy var sessionQueue: DispatchQueue = {
+        let queue = DispatchQueue(label: "com.ruir.qrdemo.capture.session.v2")
+        queue.setSpecific(key: queueSpecificKey, value: ())
+        return queue
+    }()
     private let metadataOutput = AVCaptureMetadataOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var isSessionConfigured = false
     private var wantsSessionRunning = false
+    private var hasHandledCode = false
+    private var didStartLineAnimation = false
 
     private let overlayLayer = CAShapeLayer()
     private let scanFrameView = UIView()
     private let scanLine = UIView()
     private let tipLabel: UILabel = {
         let label = UILabel()
-        label.text = "将二维码放入框内即可自动扫描"
+        label.text = "V2：将二维码放入框内即可自动扫描"
         label.textColor = .white
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textAlignment = .center
         return label
     }()
 
-    private var hasHandledCode = false
-    private var didStartLineAnimation = false
-
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
         setupUI()
         setupCaptureSession()
-        logInfo(logTag, items: "扫码页加载完成")
+        logInfo(logTag, items: "扫码页 V2 加载完成")
     }
 
     override func viewDidLayoutSubviews() {
@@ -61,15 +65,21 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         hasHandledCode = false
-        logInfo(logTag, items: "扫码页即将显示")
+        logInfo(logTag, items: "扫码页 V2 即将显示")
+
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.wantsSessionRunning = true
-            if self.isSessionConfigured {
-                if !self.captureSession.isRunning {
-                    logInfo(self.logTag, items: "开始运行 AVCaptureSession")
-                    self.captureSession.startRunning()
-                }
+            guard self.isSessionConfigured else { return }
+
+            self.captureSession.beginConfiguration()
+            self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+            self.metadataOutput.metadataObjectTypes = [.qr]
+            self.captureSession.commitConfiguration()
+
+            if !self.captureSession.isRunning {
+                logInfo(self.logTag, items: "V2 启动 AVCaptureSession")
+                self.captureSession.startRunning()
             }
         }
     }
@@ -77,14 +87,60 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         logInfo(logTag, items: "扫码页即将消失")
+
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.wantsSessionRunning = false
+
             if self.captureSession.isRunning {
                 logInfo(self.logTag, items: "停止 AVCaptureSession")
                 self.captureSession.stopRunning()
             }
+
+            self.captureSession.beginConfiguration()
+            self.metadataOutput.setMetadataObjectsDelegate(nil, queue: nil)
+            self.metadataOutput.metadataObjectTypes = []
+            self.captureSession.commitConfiguration()
+
+            logInfo(self.logTag, items: "已重置元数据监听")
         }
+    }
+
+    deinit {
+        logInfo(logTag, items: "QRScannerViewController V2 销毁")
+
+        let cleanupSession = { [self] in
+            if captureSession.isRunning {
+                captureSession.stopRunning()
+            }
+
+            captureSession.beginConfiguration()
+            captureSession.inputs.forEach { input in
+                captureSession.removeInput(input)
+            }
+            captureSession.outputs.forEach { output in
+                captureSession.removeOutput(output)
+            }
+            captureSession.commitConfiguration()
+        }
+
+        if DispatchQueue.getSpecific(key: queueSpecificKey) != nil {
+            cleanupSession()
+        } else {
+            sessionQueue.sync(execute: cleanupSession)
+        }
+
+        let cleanupPreview = { [self] in
+            previewLayer?.removeFromSuperlayer()
+            previewLayer = nil
+        }
+        if Thread.isMainThread {
+            cleanupPreview()
+        } else {
+            DispatchQueue.main.sync(execute: cleanupPreview)
+        }
+
+        logInfo(logTag, items: "资源清理完成")
     }
 
     private func setupUI() {
@@ -151,12 +207,12 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         sessionQueue.async { [weak self] in
             guard let self else { return }
             guard !self.isSessionConfigured else { return }
-            logInfo(self.logTag, items: "开始配置 AVCaptureSession")
+            logInfo(self.logTag, items: "V2 开始配置 AVCaptureSession")
 
             guard let camera = AVCaptureDevice.default(for: .video) else {
                 DispatchQueue.main.async {
-                    logError(self.logTag, items: "无法获取相机设备")
-                    self.delegate?.qrScannerDidCancel(self)
+                    logError(self.logTag, items: "V2 无法获取相机设备")
+                    self.delegate?.qrScannerV2DidCancel(self)
                 }
                 return
             }
@@ -171,16 +227,16 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
                 if self.captureSession.canAddOutput(self.metadataOutput) {
                     self.captureSession.addOutput(self.metadataOutput)
-                    self.metadataOutput.metadataObjectTypes = [.qr]
                     self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+                    self.metadataOutput.metadataObjectTypes = [.qr]
                     self.metadataOutput.rectOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
                 }
 
                 self.captureSession.commitConfiguration()
                 self.isSessionConfigured = true
-                logInfo(self.logTag, items: "AVCaptureSession 配置完成")
+                logInfo(self.logTag, items: "V2 AVCaptureSession 配置完成")
+
                 if self.wantsSessionRunning && !self.captureSession.isRunning {
-                    logInfo(self.logTag, items: "配置完成后启动 AVCaptureSession")
                     self.captureSession.startRunning()
                 }
 
@@ -192,12 +248,12 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
                     self.previewLayer = preview
                     self.previewLayer?.frame = self.view.bounds
                     self.updateScanOverlay()
-                    logInfo(self.logTag, items: "相机预览层已添加")
+                    logInfo(self.logTag, items: "V2 相机预览层已添加")
                 }
             } catch {
                 DispatchQueue.main.async {
-                    logError(self.logTag, items: "配置 AVCaptureSession 失败:", error.localizedDescription)
-                    self.delegate?.qrScannerDidCancel(self)
+                    logError(self.logTag, items: "V2 配置 AVCaptureSession 失败:", error.localizedDescription)
+                    self.delegate?.qrScannerV2DidCancel(self)
                 }
             }
         }
@@ -212,8 +268,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     }
 
     @objc private func didTapClose() {
-        logInfo(logTag, items: "点击关闭扫码页")
-        delegate?.qrScannerDidCancel(self)
+        logInfo(logTag, items: "V2 点击关闭扫码页")
+        delegate?.qrScannerV2DidCancel(self)
     }
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
@@ -228,16 +284,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         }
 
         hasHandledCode = true
-        logInfo(logTag, items: "识别到二维码:", code)
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.wantsSessionRunning = false
-            self.metadataOutput.metadataObjectTypes = []
-            logInfo(self.logTag, items: "已停止后续识别回调")
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.delegate?.qrScanner(self, didScan: code)
-        }
+        logInfo(logTag, items: "V2 识别到二维码:", code)
+        delegate?.qrScannerV2(self, didScan: code)
     }
 }

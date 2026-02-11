@@ -323,7 +323,7 @@ extension QRScannerViewController {
             return nil
         }
         // 5) 取第一个有效 payload（如需多码可改成返回数组）
-        let results = (request.results as? [VNBarcodeObservation]) ?? []
+        let results = request.results ?? []
         return results
             .compactMap { $0.payloadStringValue }
             .first { !$0.isEmpty }

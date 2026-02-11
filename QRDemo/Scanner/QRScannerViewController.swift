@@ -7,6 +7,10 @@
 
 import UIKit
 import AVFoundation
+import PhotosUI
+import CoreImage
+import Vision
+import ImageIO
 
 /// 扫码结果回调协议。
 protocol QRScannerViewControllerDelegate: AnyObject {
@@ -129,6 +133,14 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         closeButton.addTarget(self, action: #selector(didTapClose), for: .touchUpInside)
         view.addSubview(closeButton)
 
+        let albumButton = UIButton(type: .system)
+        albumButton.setTitle("相册", for: .normal)
+        albumButton.setTitleColor(.white, for: .normal)
+        albumButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        albumButton.translatesAutoresizingMaskIntoConstraints = false
+        albumButton.addTarget(self, action: #selector(didTapAlbum), for: .touchUpInside)
+        view.addSubview(albumButton)
+
         let side = min(view.bounds.width * 0.7, 280)
         NSLayoutConstraint.activate([
             scanFrameView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -145,7 +157,10 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             tipLabel.topAnchor.constraint(equalTo: scanFrameView.bottomAnchor, constant: 18),
 
             closeButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
-            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10)
+            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+
+            albumButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
+            albumButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10)
         ])
     }
 
@@ -234,6 +249,24 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         delegate?.qrScannerDidCancel(self)
     }
 
+    private func handleDetectedCode(_ code: String, source: String) {
+        guard !hasHandledCode else { return }
+
+        hasHandledCode = true
+        logInfo(logTag, items: "\(source)识别到二维码:", code)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.wantsSessionRunning = false
+            // 移除可识别类型即可停止回调，防止重复触发。
+            self.metadataOutput.metadataObjectTypes = []
+            logInfo(self.logTag, items: "已停止后续识别回调")
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.qrScanner(self, didScan: code)
+        }
+    }
+
     /// 识别到二维码后上报结果，并立即关闭后续识别回调。
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !hasHandledCode else { return }
@@ -246,18 +279,140 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
             return
         }
 
-        hasHandledCode = true
-        logInfo(logTag, items: "识别到二维码:", code)
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.wantsSessionRunning = false
-            // 移除可识别类型即可停止回调，防止重复触发。
-            self.metadataOutput.metadataObjectTypes = []
-            logInfo(self.logTag, items: "已停止后续识别回调")
+        handleDetectedCode(code, source: "相机")
+    }
+}
+
+// MARK: - 相册选图
+extension QRScannerViewController {
+    @objc private func didTapAlbum() {
+        guard !hasHandledCode else { return }
+        logInfo(logTag, items: "点击相册入口")
+        presentPhotoPicker()
+    }
+
+    private func presentPhotoPicker() {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.selectionLimit = 1
+        configuration.filter = .images
+        configuration.preferredAssetRepresentationMode = .current
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
+    /// iOS 15+：使用 Vision 识别二维码（支持多方向、更稳）
+    /// - Note: 这是同步实现；如果你用于相机实时流，建议放到后台队列或改成 async。
+    private func detectQRCodeV2(in image: UIImage) -> String? {
+        // 1) 优先使用 CGImage（Vision 对 CGImage 最直接）
+        guard let cgImage = image.cgImage else { return nil }
+
+        // 2) 处理图片方向（非常重要：相册/拍照图片常有 orientation）
+        let orientation = CGImagePropertyOrientation(image.imageOrientation)
+
+        // 3) 只识别 QR（更快、更准）；如需条形码可扩展 symbologies
+        let request = VNDetectBarcodesRequest()
+        request.symbologies = [.qr]
+
+        // 4) 执行识别
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
         }
-        DispatchQueue.main.async { [weak self] in
+        // 5) 取第一个有效 payload（如需多码可改成返回数组）
+        let results = (request.results as? [VNBarcodeObservation]) ?? []
+        return results
+            .compactMap { $0.payloadStringValue }
+            .first { !$0.isEmpty }
+    }
+
+    private func detectQRCodeV1(in image: UIImage) -> String? {
+        guard let ciImage = CIImage(image: image) else {
+            return nil
+        }
+        let options = [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+        guard let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: options) else {
+            return nil
+        }
+        let features = detector.features(in: ciImage)
+        return features .compactMap { ($0 as? CIQRCodeFeature)?.messageString } .first { !$0.isEmpty } }
+    
+    private func showAlbumRecognizeFailedAlert() {
+        let alert = UIAlertController(title: "未识别到二维码", message: "请重新选择一张包含清晰二维码的图片。", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "知道了", style: .default))
+        present(alert, animated: true)
+    }
+}
+
+// MARK: - UIImageOrientation -> CGImagePropertyOrientation
+private extension CGImagePropertyOrientation {
+    init(_ uiOrientation: UIImage.Orientation) {
+        switch uiOrientation {
+        case .up: self = .up
+        case .down: self = .down
+        case .left: self = .left
+        case .right: self = .right
+        case .upMirrored: self = .upMirrored
+        case .downMirrored: self = .downMirrored
+        case .leftMirrored: self = .leftMirrored
+        case .rightMirrored: self = .rightMirrored
+        @unknown default: self = .up
+        }
+    }
+}
+
+extension QRScannerViewController: PHPickerViewControllerDelegate {
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true) { [weak self] in
             guard let self else { return }
-            self.delegate?.qrScanner(self, didScan: code)
+
+            guard let result = results.first else {
+                logInfo(self.logTag, items: "用户取消相册选择")
+                return
+            }
+
+            let provider = result.itemProvider
+            guard provider.canLoadObject(ofClass: UIImage.self) else {
+                logError(self.logTag, items: "所选资源无法读取为图片")
+                self.showAlbumRecognizeFailedAlert()
+                return
+            }
+
+            logInfo(self.logTag, items: "开始识别相册图片二维码")
+            provider.loadObject(ofClass: UIImage.self) { [weak self] object, error in
+                guard let self else { return }
+
+                if let error {
+                    DispatchQueue.main.async {
+                        logError(self.logTag, items: "读取相册图片失败:", error.localizedDescription)
+                        self.showAlbumRecognizeFailedAlert()
+                    }
+                    return
+                }
+
+                guard let image = object as? UIImage else {
+                    DispatchQueue.main.async {
+                        logError(self.logTag, items: "读取相册图片失败: 类型转换失败")
+                        self.showAlbumRecognizeFailedAlert()
+                    }
+                    return
+                }
+
+                guard let code = self.detectQRCodeV2(in: image) else {
+                    DispatchQueue.main.async {
+                        logInfo(self.logTag, items: "相册图片中未识别到二维码")
+                        self.showAlbumRecognizeFailedAlert()
+                    }
+                    return
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleDetectedCode(code, source: "相册")
+                }
+            }
         }
     }
 }

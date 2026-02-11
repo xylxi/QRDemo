@@ -16,20 +16,9 @@ final class ViewController: UIViewController {
 
     private let scanButton: UIButton = {
         let button = UIButton(type: .system)
-        button.setTitle("扫一扫（V1）", for: .normal)
+        button.setTitle("扫一扫", for: .normal)
         button.titleLabel?.font = .boldSystemFont(ofSize: 20)
         button.backgroundColor = .systemBlue
-        button.setTitleColor(.white, for: .normal)
-        button.layer.cornerRadius = 14
-        button.heightAnchor.constraint(equalToConstant: 56).isActive = true
-        return button
-    }()
-
-    private let scanV2Button: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("扫一扫（V2）", for: .normal)
-        button.titleLabel?.font = .boldSystemFont(ofSize: 20)
-        button.backgroundColor = .systemIndigo
         button.setTitleColor(.white, for: .normal)
         button.layer.cornerRadius = 14
         button.heightAnchor.constraint(equalToConstant: 56).isActive = true
@@ -77,7 +66,7 @@ final class ViewController: UIViewController {
     }
 
     private func setupLayout() {
-        let stack = UIStackView(arrangedSubviews: [scanButton, scanV2Button, generateButton, qrImageView, infoLabel])
+        let stack = UIStackView(arrangedSubviews: [scanButton, generateButton, qrImageView, infoLabel])
         stack.axis = .vertical
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -93,32 +82,26 @@ final class ViewController: UIViewController {
 
     private func bindActions() {
         scanButton.addTarget(self, action: #selector(didTapScan), for: .touchUpInside)
-        scanV2Button.addTarget(self, action: #selector(didTapScanV2), for: .touchUpInside)
         generateButton.addTarget(self, action: #selector(didTapGenerateQRCode), for: .touchUpInside)
     }
 
     @objc private func didTapScan() {
-        logInfo(logTag, items: "点击扫一扫 V1")
-        requestCameraAndScan(version: .v1)
+        logInfo(logTag, items: "点击扫一扫")
+        requestCameraAndScan()
     }
 
-    @objc private func didTapScanV2() {
-        logInfo(logTag, items: "点击扫一扫 V2")
-        requestCameraAndScan(version: .v2)
-    }
-
-    private func requestCameraAndScan(version: ScanVersion) {
+    private func requestCameraAndScan() {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         logInfo(logTag, items: "当前相机权限:", status.rawValue)
         switch status {
         case .authorized:
-            presentScanner(version: version)
+            presentScanner()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
-                        logInfo(self?.logTag ?? "ViewController", items: "用户授权相机，准备打开扫码页", version == .v1 ? "V1" : "V2")
-                        self?.presentScanner(version: version)
+                        logInfo(self?.logTag ?? "ViewController", items: "用户授权相机，准备打开扫码页")
+                        self?.presentScanner()
                     } else {
                         logError(self?.logTag ?? "ViewController", items: "用户拒绝相机权限")
                         self?.showCameraDeniedAlert()
@@ -134,21 +117,12 @@ final class ViewController: UIViewController {
         }
     }
 
-    private func presentScanner(version: ScanVersion) {
-        switch version {
-        case .v1:
-            logInfo(logTag, items: "present 扫码页面 V1")
-            let scanner = QRScannerViewController()
-            scanner.delegate = self
-            scanner.modalPresentationStyle = .fullScreen
-            present(scanner, animated: true)
-        case .v2:
-            logInfo(logTag, items: "present 扫码页面 V2")
-            let scanner = QRScannerV2ViewController()
-            scanner.delegate = self
-            scanner.modalPresentationStyle = .fullScreen
-            present(scanner, animated: true)
-        }
+    private func presentScanner() {
+        logInfo(logTag, items: "present 扫码页面")
+        let scanner = QRScannerViewController()
+        scanner.delegate = self
+        scanner.modalPresentationStyle = .fullScreen
+        present(scanner, animated: true)
     }
 
     @objc private func didTapGenerateQRCode() {
@@ -236,32 +210,13 @@ final class ViewController: UIViewController {
 extension ViewController: QRScannerViewControllerDelegate {
     func qrScanner(_ controller: QRScannerViewController, didScan code: String) {
         controller.dismiss(animated: true) { [weak self] in
-            logInfo(self?.logTag ?? "ViewController", items: "V1 扫码结果:", code)
-            self?.infoLabel.text = "V1 扫码结果：\(code)"
+            logInfo(self?.logTag ?? "ViewController", items: "扫码结果:", code)
+            self?.infoLabel.text = "扫码结果：\(code)"
         }
     }
 
     func qrScannerDidCancel(_ controller: QRScannerViewController) {
-        logInfo(logTag, items: "用户关闭扫码页面 V1")
+        logInfo(logTag, items: "用户关闭扫码页面")
         controller.dismiss(animated: true)
     }
-}
-
-extension ViewController: QRScannerV2ViewControllerDelegate {
-    func qrScannerV2(_ controller: QRScannerV2ViewController, didScan code: String) {
-        controller.dismiss(animated: true) { [weak self] in
-            logInfo(self?.logTag ?? "ViewController", items: "V2 扫码结果:", code)
-            self?.infoLabel.text = "V2 扫码结果：\(code)"
-        }
-    }
-
-    func qrScannerV2DidCancel(_ controller: QRScannerV2ViewController) {
-        logInfo(logTag, items: "用户关闭扫码页面 V2")
-        controller.dismiss(animated: true)
-    }
-}
-
-private enum ScanVersion {
-    case v1
-    case v2
 }

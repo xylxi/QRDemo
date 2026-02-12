@@ -110,25 +110,53 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     }
 
     /// 页面即将消失时在 sessionQueue 上停止相机会话；若正在展示相册则保持运行。
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
         if isPresentingPhotoPicker {
             logInfo(logTag, items: "扫码页被相册覆盖，保持相机会话运行")
             return
         }
         logInfo(logTag, items: "扫码页即将消失")
+        // 1) 主线程先断开预览层与 session 的连接，
+        //    避免 session 停止时预览层仍持有管线引用导致 XPC 冲突。
+        previewLayer?.session = nil
+        // 2) 本地强引用 session，即使 self 先释放，session 也能完成停止。
+        let session = captureSession
+        let tag = logTag
         sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.wantsSessionRunning = false
-            if self.captureSession.isRunning {
-                logInfo(self.logTag, items: "停止 AVCaptureSession")
-                self.captureSession.stopRunning()
-            }
+            self?.wantsSessionRunning = false
+            guard session.isRunning else { return }
+            logInfo(tag, items: "停止 AVCaptureSession")
+            // 3) beginConfiguration 暂停管线后批量移除输入输出，
+            //    避免逐个移除时触发 FigXPCUtilities 错误。
+            session.beginConfiguration()
+            for input in session.inputs { session.removeInput(input) }
+            for output in session.outputs { session.removeOutput(output) }
+            session.commitConfiguration()
+            // 4) 输入输出已全部移除，停止空 session 不再涉及 XPC 通信。
+            session.stopRunning()
+            self?.isSessionConfigured = false
+            logInfo(tag, items: "AVCaptureSession 已停止并清理完成")
         }
     }
 
-    /// 控制器释放时打日志，便于排查生命周期问题。
+    /// 控制器释放时确保 AVCaptureSession 被干净停止，并打日志。
     deinit {
+        let session = captureSession
+        let tag = logTag
+        // 安全兜底：仅在 session 仍需清理时才派发 block。
+        if session.isRunning || !session.inputs.isEmpty || !session.outputs.isEmpty {
+            sessionQueue.async {
+                if session.isRunning {
+                    session.beginConfiguration()
+                    for input in session.inputs { session.removeInput(input) }
+                    for output in session.outputs { session.removeOutput(output) }
+                    session.commitConfiguration()
+                    session.stopRunning()
+                }
+                logInfo(tag, items: "deinit 兜底: AVCaptureSession 已清理")
+            }
+        }
         logInfo(logTag, items: "deinit")
     }
 }
@@ -358,8 +386,8 @@ extension QRScannerViewController {
         configuration.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: configuration)
         picker.delegate = self
-//        picker.presentationController?.delegate = self
-        picker.modalPresentationStyle = .fullScreen
+        picker.presentationController?.delegate = self
+//        picker.modalPresentationStyle = .fullScreen
         activePhotoPicker = picker
         logInfo(logTag, items: "打开相册（保持相机运行）")
         installFreezeFrameOverlay(reason: "相册打开完成")

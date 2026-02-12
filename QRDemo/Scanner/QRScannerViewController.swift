@@ -72,8 +72,8 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     private var isAlbumPicking = false
     /// 是否正在展示相册选择器；为 true 时 viewWillDisappear 不停止相机会话。
     private var isPresentingPhotoPicker = false
-    /// 相册二维码识别后台队列，避免首次选图识别卡住主线程。
-    private let albumRecognizeQueue = DispatchQueue(label: "com.ruir.qrdemo.album.recognize", qos: .userInitiated)
+    /// 打开相册时覆盖在预览上的“冻结最后一帧”视图，用于过渡动画。
+    private var transitionFreezeView: UIView?
     
     /// 初始化背景色、UI 和采集会话，并打日志。
     override func viewDidLoad() {
@@ -90,6 +90,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
         updateScanOverlay()
+        transitionFreezeView?.frame = view.bounds
         if !didStartLineAnimation, scanFrameView.bounds.height > 0 {
             startScanLineAnimation()
             didStartLineAnimation = true
@@ -346,6 +347,7 @@ extension QRScannerViewController {
         guard !hasHandledCode else { return }
 
         hasHandledCode = true
+        removeFreezeFrameOverlay()
         logInfo(logTag, items: "\(source)识别到二维码:", code)
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -391,6 +393,7 @@ extension QRScannerViewController {
     /// 通过相册 provider 发起选图流程（系统相册或自定义相册）。
     private func presentPhotoPicker() {
         logInfo(logTag, items: "打开相册（保持相机运行）")
+        installFreezeFrameOverlay(reason: "相册打开前冻结预览")
         albumProvider.startPicking(from: self)
     }
 
@@ -468,21 +471,6 @@ private extension QRScannerViewController {
             .first { !$0.isEmpty }
     }
 
-    /// 识别前缩放超大图片，降低首次解码和识别开销。
-    func prepareImageForQRCodeDetection(_ image: UIImage, maxDimension: CGFloat = 1600) -> UIImage {
-        let sourceSize = image.size
-        let maxSide = max(sourceSize.width, sourceSize.height)
-        guard maxSide > maxDimension, maxSide > 0 else { return image }
-
-        let scale = maxDimension / maxSide
-        let targetSize = CGSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
-        return renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: targetSize))
-        }
-    }
 }
 
 // MARK: - UIImageOrientation 转 CGImagePropertyOrientation（供 Vision 使用）
@@ -528,26 +516,19 @@ extension QRScannerViewController: QRScannerAlbumProviderDelegate {
         resumeScanningAfterAlbumIfNeeded(reason: "读取图片失败")
     }
 
-    /// 收到选中图片后在后台识别二维码，避免主线程卡顿。
+    /// 收到选中图片后直接识别二维码。
     func albumProvider(_ provider: QRScannerAlbumProvider, didPick image: UIImage) {
         isAlbumPicking = false
         isPresentingPhotoPicker = false
         logInfo(logTag, items: "开始识别相册图片二维码")
-        albumRecognizeQueue.async { [weak self] in
-            guard let self else { return }
-            let preparedImage = self.prepareImageForQRCodeDetection(image)
-            let code = self.detectQRCodeV1(in: preparedImage) ?? self.detectQRCodeV2(in: preparedImage)
-            self.runOnMainThread { [weak self] in
-                guard let self else { return }
-                guard let code else {
-                    logInfo(self.logTag, items: "相册图片中未识别到二维码")
-                    self.showAlbumRecognizeFailedAlert()
-                    self.resumeScanningAfterAlbumIfNeeded(reason: "图片中未识别到二维码")
-                    return
-                }
-                self.handleDetectedCode(code, source: "相册")
-            }
+        let code = detectQRCodeV1(in: image) ?? detectQRCodeV2(in: image)
+        guard let code else {
+            logInfo(logTag, items: "相册图片中未识别到二维码")
+            showAlbumRecognizeFailedAlert()
+            resumeScanningAfterAlbumIfNeeded(reason: "图片中未识别到二维码")
+            return
         }
+        handleDetectedCode(code, source: "相册")
     }
 
     /// 相册流程结束且未识别到码时，恢复元数据代理与 QR 类型，重新启动相机会话。
@@ -568,6 +549,39 @@ extension QRScannerViewController: QRScannerAlbumProviderDelegate {
                 logInfo(self.logTag, items: "相机会话已停止，补启动 AVCaptureSession")
                 self.captureSession.startRunning()
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.removeFreezeFrameOverlay()
+            }
+        }
+    }
+}
+
+// MARK: - 冻结帧过渡（打开相册时用最后一帧覆盖预览，避免黑屏）
+private extension QRScannerViewController {
+    /// 在预览上覆盖当前画面的快照视图，用于打开相册时的过渡效果；主线程执行。
+    /// - Parameter reason: 安装原因，仅用于日志。
+    func installFreezeFrameOverlay(reason: String) {
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            self.removeFreezeFrameOverlay()
+            guard let snapshot = self.view.snapshotView(afterScreenUpdates: false) else {
+                logError(self.logTag, items: "冻结帧创建失败")
+                return
+            }
+            snapshot.frame = self.view.bounds
+            snapshot.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            self.view.addSubview(snapshot)
+            self.transitionFreezeView = snapshot
+            logInfo(self.logTag, items: "已安装冻结帧:", reason)
+        }
+    }
+
+    /// 移除冻结帧覆盖层；若在非主线程调用会派发到主线程执行。
+    func removeFreezeFrameOverlay() {
+        runOnMainThread { [weak self] in
+            guard let self else { return }
+            self.transitionFreezeView?.removeFromSuperview()
+            self.transitionFreezeView = nil
         }
     }
 }

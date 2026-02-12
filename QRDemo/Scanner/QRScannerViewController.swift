@@ -7,7 +7,6 @@
 
 import UIKit
 import AVFoundation
-import PhotosUI
 import CoreImage
 import Vision
 import ImageIO
@@ -26,6 +25,12 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
     /// 扫码结果与取消事件的回调代理。
     weak var delegate: QRScannerViewControllerDelegate?
+    /// 相册来源抽象：默认使用系统相册，可外部替换为自定义相册实现。
+    var albumProvider: QRScannerAlbumProvider = SystemPhotoPickerAlbumProvider() {
+        didSet {
+            albumProvider.delegate = self
+        }
+    }
     /// 日志标签，用于区分本模块的日志输出。
     private let logTag = "QRScanner"
 
@@ -67,15 +72,14 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
     private var isAlbumPicking = false
     /// 是否正在展示相册选择器；为 true 时 viewWillDisappear 不停止相机会话。
     private var isPresentingPhotoPicker = false
-    /// 当前展示的相册选择器弱引用，用于 dismiss 后清理与手势关闭判断。
-    private weak var activePhotoPicker: PHPickerViewController?
-    /// 打开相册时覆盖在预览上的“冻结最后一帧”视图，用于过渡动画。
-    private var transitionFreezeView: UIView?
+    /// 相册二维码识别后台队列，避免首次选图识别卡住主线程。
+    private let albumRecognizeQueue = DispatchQueue(label: "com.ruir.qrdemo.album.recognize", qos: .userInitiated)
     
     /// 初始化背景色、UI 和采集会话，并打日志。
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        albumProvider.delegate = self
         setupUI()
         setupCaptureSession()
         logInfo(logTag, items: "扫码页加载完成")
@@ -86,7 +90,6 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
         updateScanOverlay()
-        transitionFreezeView?.frame = view.bounds
         if !didStartLineAnimation, scanFrameView.bounds.height > 0 {
             startScanLineAnimation()
             didStartLineAnimation = true
@@ -335,7 +338,7 @@ extension QRScannerViewController {
         }
     }
 
-    /// 统一处理识别到的二维码：防重复、移除冻结帧、停止识别回调并通知代理。
+    /// 统一处理识别到的二维码：防重复、停止识别回调并通知代理。
     /// - Parameters:
     ///   - code: 识别到的二维码字符串内容。
     ///   - source: 来源描述（如 "相机"、"相册"），仅用于日志。
@@ -343,7 +346,6 @@ extension QRScannerViewController {
         guard !hasHandledCode else { return }
 
         hasHandledCode = true
-        removeFreezeFrameOverlay()
         logInfo(logTag, items: "\(source)识别到二维码:", code)
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -386,26 +388,13 @@ extension QRScannerViewController {
         presentPhotoPicker()
     }
 
-    /// 创建并展示 PHPickerViewController，选择单张图片；展示完成后在后台停止相机并安装冻结帧。
+    /// 通过相册 provider 发起选图流程（系统相册或自定义相册）。
     private func presentPhotoPicker() {
-        var configuration = PHPickerConfiguration(photoLibrary: .shared())
-        configuration.selectionLimit = 1
-        configuration.filter = .images
-        configuration.preferredAssetRepresentationMode = .current
-        let picker = PHPickerViewController(configuration: configuration)
-        picker.delegate = self
-        picker.presentationController?.delegate = self
-        activePhotoPicker = picker
         logInfo(logTag, items: "打开相册（保持相机运行）")
-        installFreezeFrameOverlay(reason: "相册打开完成")
-        present(picker, animated: true) { [weak self] in
-            guard let self else { return }
-            logInfo(self.logTag, items: "相册已展示完成，准备停止拍摄并安装冻结帧")
-            self.stopCameraAfterAlbumPresented()
-        }
+        albumProvider.startPicking(from: self)
     }
 
-    /// 相册已完全展示后，在 sessionQueue 上停止 AVCaptureSession，并在主线程安装冻结帧覆盖层。
+    /// 相册已完全展示后，在 sessionQueue 上停止 AVCaptureSession。
     private func stopCameraAfterAlbumPresented() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -420,6 +409,13 @@ extension QRScannerViewController {
     /// 相册选图未识别到二维码时，弹出提示弹窗告知用户重新选择。
     private func showAlbumRecognizeFailedAlert() {
         let alert = UIAlertController(title: "未识别到二维码", message: "请重新选择一张包含清晰二维码的图片。", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "知道了", style: .default))
+        present(alert, animated: true)
+    }
+
+    /// 相册图片读取失败时的提示弹窗。
+    private func showAlbumLoadFailedAlert(message: String) {
+        let alert = UIAlertController(title: "读取图片失败", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "知道了", style: .default))
         present(alert, animated: true)
     }
@@ -467,7 +463,26 @@ private extension QRScannerViewController {
             return nil
         }
         let features = detector.features(in: ciImage)
-        return features .compactMap { ($0 as? CIQRCodeFeature)?.messageString } .first { !$0.isEmpty } }
+        return features
+            .compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+            .first { !$0.isEmpty }
+    }
+
+    /// 识别前缩放超大图片，降低首次解码和识别开销。
+    func prepareImageForQRCodeDetection(_ image: UIImage, maxDimension: CGFloat = 1600) -> UIImage {
+        let sourceSize = image.size
+        let maxSide = max(sourceSize.width, sourceSize.height)
+        guard maxSide > maxDimension, maxSide > 0 else { return image }
+
+        let scale = maxDimension / maxSide
+        let targetSize = CGSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
 }
 
 // MARK: - UIImageOrientation 转 CGImagePropertyOrientation（供 Vision 使用）
@@ -488,73 +503,54 @@ private extension CGImagePropertyOrientation {
     }
 }
 
-// MARK: - PHPickerViewControllerDelegate（相册选择完成与恢复扫描）
-extension QRScannerViewController: PHPickerViewControllerDelegate {
-    /// 相册选择完成：若用户选了图则加载图片并用 Vision 识别二维码，否则恢复扫描；关闭时移除冻结帧。
-    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-        activePhotoPicker = nil
-        logInfo(logTag, items: "关闭相册（冻结帧过渡）")
-        picker.dismiss(animated: true) { [weak self] in
+// MARK: - 相册 provider 回调（系统相册/自定义相册统一入口）
+extension QRScannerViewController: QRScannerAlbumProviderDelegate {
+    /// 相册页面展示完成后，停止相机会话降低资源占用。
+    func albumProviderDidPresentPicker(_ provider: QRScannerAlbumProvider) {
+        logInfo(logTag, items: "相册已展示完成")
+        stopCameraAfterAlbumPresented()
+    }
+
+    /// 用户取消选图后恢复扫描会话。
+    func albumProviderDidCancel(_ provider: QRScannerAlbumProvider) {
+        isAlbumPicking = false
+        isPresentingPhotoPicker = false
+        logInfo(logTag, items: "用户取消相册选择")
+        resumeScanningAfterAlbumIfNeeded(reason: "用户取消相册")
+    }
+
+    /// 相册加载失败后给出提示并恢复扫描会话。
+    func albumProvider(_ provider: QRScannerAlbumProvider, didFailToLoadImageWithDescription description: String) {
+        isAlbumPicking = false
+        isPresentingPhotoPicker = false
+        logError(logTag, items: "读取相册图片失败:", description)
+        showAlbumLoadFailedAlert(message: description)
+        resumeScanningAfterAlbumIfNeeded(reason: "读取图片失败")
+    }
+
+    /// 收到选中图片后在后台识别二维码，避免主线程卡顿。
+    func albumProvider(_ provider: QRScannerAlbumProvider, didPick image: UIImage) {
+        isAlbumPicking = false
+        isPresentingPhotoPicker = false
+        logInfo(logTag, items: "开始识别相册图片二维码")
+        albumRecognizeQueue.async { [weak self] in
             guard let self else { return }
-            self.isAlbumPicking = false
-            self.isPresentingPhotoPicker = false
-
-            guard let result = results.first else {
-                logInfo(self.logTag, items: "用户取消相册选择")
-                self.resumeScanningAfterAlbumIfNeeded(reason: "用户取消相册")
-                return
-            }
-
-            let provider = result.itemProvider
-            guard provider.canLoadObject(ofClass: UIImage.self) else {
-                logError(self.logTag, items: "所选资源无法读取为图片")
-                self.showAlbumRecognizeFailedAlert()
-                self.resumeScanningAfterAlbumIfNeeded(reason: "所选资源不可读")
-                return
-            }
-
-            logInfo(self.logTag, items: "开始识别相册图片二维码")
-            provider.loadObject(ofClass: UIImage.self) { [weak self] object, error in
+            let preparedImage = self.prepareImageForQRCodeDetection(image)
+            let code = self.detectQRCodeV1(in: preparedImage) ?? self.detectQRCodeV2(in: preparedImage)
+            self.runOnMainThread { [weak self] in
                 guard let self else { return }
-
-                if let error {
-                    self.runOnMainThread { [weak self] in
-                        guard let self else { return }
-                        logError(self.logTag, items: "读取相册图片失败:", error.localizedDescription)
-                        self.showAlbumRecognizeFailedAlert()
-                        self.resumeScanningAfterAlbumIfNeeded(reason: "读取图片失败")
-                    }
+                guard let code else {
+                    logInfo(self.logTag, items: "相册图片中未识别到二维码")
+                    self.showAlbumRecognizeFailedAlert()
+                    self.resumeScanningAfterAlbumIfNeeded(reason: "图片中未识别到二维码")
                     return
                 }
-
-                guard let image = object as? UIImage else {
-                    self.runOnMainThread { [weak self] in
-                        guard let self else { return }
-                        logError(self.logTag, items: "读取相册图片失败: 类型转换失败")
-                        self.showAlbumRecognizeFailedAlert()
-                        self.resumeScanningAfterAlbumIfNeeded(reason: "图片类型转换失败")
-                    }
-                    return
-                }
-
-                guard let code = self.detectQRCodeV2(in: image) else {
-                    self.runOnMainThread { [weak self] in
-                        guard let self else { return }
-                        logInfo(self.logTag, items: "相册图片中未识别到二维码")
-                        self.showAlbumRecognizeFailedAlert()
-                        self.resumeScanningAfterAlbumIfNeeded(reason: "图片中未识别到二维码")
-                    }
-                    return
-                }
-
-                self.runOnMainThread { [weak self] in
-                    self?.handleDetectedCode(code, source: "相册")
-                }
+                self.handleDetectedCode(code, source: "相册")
             }
         }
     }
 
-    /// 相册流程结束且未识别到码时，恢复元数据代理与 QR 类型，重新启动相机会话并移除冻结帧。
+    /// 相册流程结束且未识别到码时，恢复元数据代理与 QR 类型，重新启动相机会话。
     /// - Parameter reason: 恢复原因描述，仅用于日志。
     fileprivate func resumeScanningAfterAlbumIfNeeded(reason: String) {
         sessionQueue.async { [weak self] in
@@ -572,53 +568,6 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
                 logInfo(self.logTag, items: "相机会话已停止，补启动 AVCaptureSession")
                 self.captureSession.startRunning()
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.removeFreezeFrameOverlay()
-            }
-        }
-    }
-}
-
-// MARK: - UIAdaptivePresentationControllerDelegate（相册下滑手势关闭）
-extension QRScannerViewController: UIAdaptivePresentationControllerDelegate {
-    /// 用户通过下滑手势关闭相册时，清理选图状态并恢复扫码会话与界面。
-    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-        guard presentationController.presentedViewController is PHPickerViewController else { return }
-        guard isAlbumPicking else { return }
-        activePhotoPicker = nil
-        isAlbumPicking = false
-        isPresentingPhotoPicker = false
-        logInfo(logTag, items: "用户手势下拉关闭相册")
-        resumeScanningAfterAlbumIfNeeded(reason: "用户手势下拉关闭相册")
-    }
-}
-
-// MARK: - 冻结帧过渡（打开相册时用最后一帧覆盖预览，避免黑屏）
-private extension QRScannerViewController {
-    /// 在预览上覆盖当前画面的快照视图，用于打开相册时的过渡效果；主线程执行。
-    /// - Parameter reason: 安装原因，仅用于日志。
-    func installFreezeFrameOverlay(reason: String) {
-        runOnMainThread { [weak self] in
-            guard let self else { return }
-            self.removeFreezeFrameOverlay()
-            guard let snapshot = self.view.snapshotView(afterScreenUpdates: false) else {
-                logError(self.logTag, items: "冻结帧创建失败")
-                return
-            }
-            snapshot.frame = self.view.bounds
-            snapshot.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            self.view.addSubview(snapshot)
-            self.transitionFreezeView = snapshot
-            logInfo(self.logTag, items: "已安装冻结帧:", reason)
-        }
-    }
-
-    /// 移除冻结帧覆盖层；若在非主线程调用会派发到主线程执行。
-    func removeFreezeFrameOverlay() {
-        runOnMainThread { [weak self] in
-            guard let self else { return }
-            self.transitionFreezeView?.removeFromSuperview()
-            self.transitionFreezeView = nil
         }
     }
 }

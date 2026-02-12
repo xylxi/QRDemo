@@ -358,10 +358,11 @@ extension QRScannerViewController {
         configuration.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: configuration)
         picker.delegate = self
-        picker.presentationController?.delegate = self
-        picker.modalPresentationStyle = .overFullScreen
+//        picker.presentationController?.delegate = self
+        picker.modalPresentationStyle = .fullScreen
         activePhotoPicker = picker
         logInfo(logTag, items: "打开相册（保持相机运行）")
+        installFreezeFrameOverlay(reason: "相册打开完成")
         present(picker, animated: true) { [weak self] in
             guard let self else { return }
             logInfo(self.logTag, items: "相册已展示完成，准备停止拍摄并安装冻结帧")
@@ -377,9 +378,6 @@ extension QRScannerViewController {
             if self.captureSession.isRunning {
                 logInfo(self.logTag, items: "相册打开完成后停止 AVCaptureSession")
                 self.captureSession.stopRunning()
-            }
-            self.runOnMainThread { [weak self] in
-                self?.installFreezeFrameOverlay(reason: "相册打开完成")
             }
         }
     }
@@ -529,7 +527,10 @@ extension QRScannerViewController: PHPickerViewControllerDelegate {
             guard self.isSessionConfigured else { return }
             guard !self.hasHandledCode else { return }
             self.wantsSessionRunning = true
-            self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+            runOnMainThread {
+                self.startScanLineAnimation()
+            }
+            // 仅恢复可识别类型即可（delegate 从未被清除，仍是 self）
             self.metadataOutput.metadataObjectTypes = [.qr]
             logInfo(self.logTag, items: "相册流程结束，恢复二维码识别:", reason)
             if !self.captureSession.isRunning {

@@ -11,6 +11,7 @@ import PhotosUI
 import CoreImage
 import Vision
 import ImageIO
+import SnapKit
 
 /// 扫码结果回调协议。
 protocol QRScannerViewControllerDelegate: AnyObject {
@@ -213,26 +214,33 @@ private extension QRScannerViewController {
         view.addSubview(albumButton)
 
         let side = min(view.bounds.width * 0.7, 280)
-        NSLayoutConstraint.activate([
-            scanFrameView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            scanFrameView.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -40),
-            scanFrameView.widthAnchor.constraint(equalToConstant: side),
-            scanFrameView.heightAnchor.constraint(equalToConstant: side),
+        scanFrameView.snp.makeConstraints { make in
+            make.centerX.equalToSuperview()
+            make.centerY.equalToSuperview().offset(-40)
+            make.width.height.equalTo(side)
+        }
 
-            scanLine.leadingAnchor.constraint(equalTo: scanFrameView.leadingAnchor, constant: 12),
-            scanLine.trailingAnchor.constraint(equalTo: scanFrameView.trailingAnchor, constant: -12),
-            scanLine.topAnchor.constraint(equalTo: scanFrameView.topAnchor, constant: 12),
-            scanLine.heightAnchor.constraint(equalToConstant: 3),
+        scanLine.snp.makeConstraints { make in
+            make.leading.equalToSuperview().offset(12)
+            make.trailing.equalToSuperview().offset(-12)
+            make.top.equalToSuperview().offset(12)
+            make.height.equalTo(3)
+        }
 
-            tipLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            tipLabel.topAnchor.constraint(equalTo: scanFrameView.bottomAnchor, constant: 18),
+        tipLabel.snp.makeConstraints { make in
+            make.centerX.equalToSuperview()
+            make.top.equalTo(scanFrameView.snp.bottom).offset(18)
+        }
 
-            closeButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
-            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+        closeButton.snp.makeConstraints { make in
+            make.leading.equalTo(view.safeAreaLayoutGuide).offset(20)
+            make.top.equalTo(view.safeAreaLayoutGuide).offset(10)
+        }
 
-            albumButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
-            albumButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10)
-        ])
+        albumButton.snp.makeConstraints { make in
+            make.trailing.equalTo(view.safeAreaLayoutGuide).offset(-20)
+            make.top.equalTo(view.safeAreaLayoutGuide).offset(10)
+        }
     }
 
     /// 启动扫描线在扫描框内的往返动画。
@@ -387,7 +395,6 @@ extension QRScannerViewController {
         let picker = PHPickerViewController(configuration: configuration)
         picker.delegate = self
         picker.presentationController?.delegate = self
-//        picker.modalPresentationStyle = .fullScreen
         activePhotoPicker = picker
         logInfo(logTag, items: "打开相册（保持相机运行）")
         installFreezeFrameOverlay(reason: "相册打开完成")
